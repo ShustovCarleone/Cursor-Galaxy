@@ -18,6 +18,7 @@ from PySide6.QtGui import (
     QColor, QBrush, QLinearGradient, QRadialGradient
 )
 
+APP_VERSION = "v1.0.0"
 RECENT_FILE = "recent_cursors.json"
 FAV_FILE = "favorites.json"
 CURSOR_LIB_PATH = "CursorsLib"
@@ -68,10 +69,12 @@ class AnimatedBackground(QLabel):
 
 class Notification(QWidget):
     def __init__(self, message, duration=3000):
-        super().__init__(flags=Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        # Передача флагов позиционно, а не по имени
+        super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.duration = duration
 
+        # Остальной код без изменений
         layout = QVBoxLayout(self)
         frame = QFrame()
         frame.setStyleSheet("background-color: #333333; border-radius: 10px;")
@@ -526,6 +529,7 @@ class MainApp(QWidget):
 
         buttons = [
             ("❤ Поддержать", self.show_support),
+            ("Обнова?", self.check_for_update),
             ("🔙 Назад", self.show_main_menu)
         ]
 
@@ -839,6 +843,71 @@ class MainApp(QWidget):
             self.show_notification("Восстановлен стандартный курсор Windows!")
         except Exception as e:
             self.show_notification(f"Ошибка: {str(e)}") 
+
+    def check_for_update(self):
+        import requests
+        import zipfile
+        import io
+        import shutil
+        import subprocess
+
+        repo_api = "https://api.github.com/repos/ShustovCarleone/Cursor-Galaxy/releases/latest"
+
+        try:
+            self.show_notification("Проверка обновлений...")
+
+            response = requests.get(repo_api, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+
+            latest_version = data["tag_name"]
+            zip_url = data["zipball_url"]
+
+            if (latest_version != APP_VERSION):
+                reply = QMessageBox.question(
+                    self,
+                    "Новая версия доступна",
+                    f"Обнаружена новая версия: {latest_version}.\nУстановить и перезапустить?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+
+                if (reply == QMessageBox.Yes):
+                    # Скачиваем и распаковываем
+                    zip_data = requests.get(zip_url)
+                    with zipfile.ZipFile(io.BytesIO(zip_data.content)) as z:
+                        temp_dir = "update_temp"
+                        if os.path.exists(temp_dir):
+                            shutil.rmtree(temp_dir)
+                        z.extractall(temp_dir)
+
+                    # Копируем файлы поверх текущих
+                    extracted_folders = os.listdir(temp_dir)
+                    if extracted_folders:
+                        extracted_path = os.path.join(temp_dir, extracted_folders[0])
+                        for item in os.listdir(extracted_path):
+                            s = os.path.join(extracted_path, item)
+                            d = os.path.join(".", item)
+                            if os.path.isdir(s):
+                                if os.path.exists(d):
+                                    shutil.rmtree(d)
+                                shutil.copytree(s, d)
+                            else:
+                                shutil.copy2(s, d)
+
+                        shutil.rmtree(temp_dir)
+                        self.show_notification("Обновление завершено!")
+                        
+                        # Перезапуск
+                        QMessageBox.information(self, "Перезапуск", "Программа будет перезапущена.")
+                        self.restart_app()
+            else:
+                QMessageBox.information(self, "Обновлений нет", "Вы используете последнюю версию.")
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось проверить обновление:\n{str(e)}")
+
+    def restart_app(self):
+        python = sys.executable
+        os.execl(python, python, *sys.argv)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
