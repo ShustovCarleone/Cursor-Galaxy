@@ -1,7 +1,7 @@
-import sys21e12ed
+import sys
 import os
-import jsondsadasd
-import ctypesasdasdasdasdasdasdqwdwd
+import json
+import ctypes
 import webbrowser
 import random
 from PySide6.QtWidgets import (
@@ -18,7 +18,7 @@ from PySide6.QtGui import (
     QColor, QBrush, QLinearGradient, QRadialGradient
 )
 
-APP_VERSION = "v1.1.0"
+APP_VERSION = "v1.0.0"
 RECENT_FILE = "recent_cursors.json"
 FAV_FILE = "favorites.json"
 CURSOR_LIB_PATH = "CursorsLib"
