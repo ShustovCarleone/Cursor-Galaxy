@@ -18,7 +18,7 @@ from PySide6.QtGui import (
     QColor, QBrush, QLinearGradient, QRadialGradient
 )
 
-APP_VERSION = "v1.0.0"
+APP_VERSION = "v1.1.0"
 RECENT_FILE = "recent_cursors.json"
 FAV_FILE = "favorites.json"
 CURSOR_LIB_PATH = "CursorsLib"
