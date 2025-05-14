@@ -4,6 +4,7 @@ import json
 import ctypes
 import webbrowser
 import random
+import hashlib
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QStackedWidget, QProgressBar, QFrame, QScrollArea, QGridLayout, 
@@ -15,15 +16,32 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QMovie, QPixmap, QIcon, QPainter, QPen, QConicalGradient, 
-    QColor, QBrush, QLinearGradient, QRadialGradient
+    QColor, QBrush, QLinearGradient, QRadialGradient, QFont
 )
 
-APP_VERSION = "v1.0.0"
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+import ssl
+import time
+import logging
+
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+APP_VERSION = "v1.2.0"
 RECENT_FILE = "recent_cursors.json"
 FAV_FILE = "favorites.json"
 CURSOR_LIB_PATH = "CursorsLib"
 ANIME_PATH = os.path.join(CURSOR_LIB_PATH, "Anime")
 CLASSIC_PATH = os.path.join(CURSOR_LIB_PATH, "Classic")
+CLIENT_SECRET_FILE = 'client_secret_487085146579-e82n54kie2or045ssev7r4qmue844db8.apps.googleusercontent.com.json'
+TOKEN_FILE = 'token.json'
+ANIME_FOLDER_ID = '1mz8c78Sd8-Obb4RAc12pBe1khlBd7ZmF'
+CLASSIC_FOLDER_ID = '1CRhP3Hvld-d_0LpRjruUEk24KNhJ8FsC'
 
 CURSOR_KEYS = {
     "pointer": "Arrow",
@@ -54,6 +72,7 @@ CURSOR_KEYS = {
     "working": "WorkingInBackground"
 }
 
+# Классы для интерфейса
 class AnimatedBackground(QLabel):
     def __init__(self, parent, gif_path):
         super().__init__(parent)
@@ -69,12 +88,10 @@ class AnimatedBackground(QLabel):
 
 class Notification(QWidget):
     def __init__(self, message, duration=3000):
-        # Передача флагов позиционно, а не по имени
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.duration = duration
 
-        # Остальной код без изменений
         layout = QVBoxLayout(self)
         frame = QFrame()
         frame.setStyleSheet("background-color: #333333; border-radius: 10px;")
@@ -101,21 +118,6 @@ class Notification(QWidget):
         self.opacity_anim.setEndValue(0)
         self.opacity_anim.finished.connect(self.close)
         self.opacity_anim.start()
-
-class Loader(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setStyleSheet("background-color: #2a2b2e;")
-        layout = QVBoxLayout(self)
-
-        label = QLabel("Загрузка...")
-        label.setStyleSheet("color: white; font-size: 16px;")
-        label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(label)
-
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 0)
-        layout.addWidget(self.progress)
 
 class AnimatedGIF(QLabel):
     def __init__(self, gif_path, width=195, height=150):
@@ -173,7 +175,6 @@ class AnimatedGIF(QLabel):
         self.setFixedSize(size)
         self.movie.setScaledSize(size)
 
-
     animatedSize = Property(QSize, get_animated_size, set_animated_size)
 
 class Worker(QObject):
@@ -221,12 +222,7 @@ class StarryBackground(QWidget):
 
     def init_stars(self, count):
         for _ in range(count):
-            self.stars.append((
-                random.randint(0, self.width()),
-                random.randint(0, self.height()),
-                random.randint(1, 3),
-                random.randint(50, 255)
-            ))
+            self.stars.append((random.randint(0, self.width()), random.randint(0, self.height()), random.randint(1, 3), random.randint(50, 255)))
 
     def update_stars(self):
         self.stars = [(x, y, s, random.randint(50, 255)) for x, y, s, _ in self.stars]
@@ -284,6 +280,59 @@ class AnimatedBorderWidget(QWidget):
         painter.setPen(pen)
         painter.drawRoundedRect(rect, 10, 10)
 
+class Loader(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background-color: #1a1b1e; border-radius: 10px;")
+        layout = QVBoxLayout(self)
+
+        self.title_label = QLabel("Загрузка курсоров...")
+        self.title_label.setStyleSheet("""
+            color: #aaccff;
+            font-size: 42px;
+            font-weight: bold;
+            font-family: 'Segoe UI';
+        """)
+        self.title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.title_label)
+
+        self.file_label = QLabel("Ожидание...")
+        self.file_label.setStyleSheet("""
+            color: #88aaff;
+            font-size: 16px;
+            font-family: 'Segoe UI';
+        """)
+        self.file_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.file_label)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid #4466ff;
+                border-radius: 5px;
+                background-color: #2a2b2e;
+                text-align: center;
+                color: white;
+                font-family: 'Segoe UI';
+            }
+            QProgressBar::chunk {
+                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #4466ff, stop:1 #88aaff);
+                border-radius: 3px;
+            }
+        """)
+        layout.addWidget(self.progress)
+
+        self.info_label = QLabel("")
+        self.info_label.setStyleSheet("""
+            color: #a0a0a0;
+            font-size: 14px;
+            font-family: 'Segoe UI';
+        """)
+        self.info_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.info_label)
+
 class MainApp(QWidget):
     def __init__(self):
         super().__init__()
@@ -302,8 +351,167 @@ class MainApp(QWidget):
         self.current_category = "anime"
         self.is_fav_mode = False
 
-        self.load_data()
+        self.last_drive_check = None
         self.init_ui()
+        self.load_data()
+        self.check_for_new_cursors()
+
+    def check_cursors_exist(self):
+        def has_files(path):
+            return os.path.exists(path) and any(os.listdir(path))
+        return all([
+            has_files(CURSOR_LIB_PATH),
+            has_files(ANIME_PATH),
+            has_files(CLASSIC_PATH)
+        ])
+
+    def check_for_new_cursors(self):
+        try:
+            logging.info("Проверка новых курсоров...")
+            drive_service = authenticate_google_drive()
+            missing_files = self.verify_installed_files(drive_service)
+            
+            if not missing_files:
+                logging.info("Все курсоры уже установлены")
+                self.show_notification("Все курсоры уже установлены!")
+                return
+            
+            logging.info(f"Найдено {len(missing_files)} отсутствующих/устаревших файлов")
+            self.show_download_dialog(missing_files)
+        except Exception as e:
+            logging.error(f"Ошибка проверки новых курсоров: {str(e)}")
+            self.show_notification(f"Ошибка проверки курсоров: {str(e)}")
+
+    def verify_installed_files(self, drive_service):
+        """Проверяет, все ли файлы с Google Drive присутствуют локально"""
+        logging.info("Проверка локальных файлов...")
+        local_files = {}
+        missing_files = []
+
+        # Собираем локальные файлы и их MD5-хеши
+        for path in [ANIME_PATH, CLASSIC_PATH]:
+            if not os.path.exists(path):
+                os.makedirs(path, exist_ok=True)
+            for root, _, files in os.walk(path):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    try:
+                        with open(file_path, 'rb') as f:
+                            local_files[file_path] = hashlib.md5(f.read()).hexdigest()
+                    except Exception as e:
+                        logging.warning(f"Не удалось вычислить MD5 для {file_path}: {str(e)}")
+
+        # Собираем файлы с Google Drive рекурсивно
+        drive_files = {}
+        def collect_drive_files(folder_id, base_path):
+            try:
+                results = drive_service.files().list(
+                    q=f"'{folder_id}' in parents",
+                    fields="files(id, name, mimeType, md5Checksum)"
+                ).execute()
+                for item in results.get('files', []):
+                    file_path = os.path.join(base_path, item['name'])
+                    if item.get('mimeType') == 'application/vnd.google-apps.folder':
+                        collect_drive_files(item['id'], file_path)
+                    else:
+                        drive_files[file_path] = {
+                            'id': item['id'],
+                            'name': item['name'],
+                            'md5': item.get('md5Checksum')
+                        }
+            except Exception as e:
+                logging.error(f"Ошибка при получении файлов с Drive (folder_id: {folder_id}): {str(e)}")
+
+        logging.info("Получение файлов с Google Drive...")
+        collect_drive_files(ANIME_FOLDER_ID, ANIME_PATH)
+        collect_drive_files(CLASSIC_FOLDER_ID, CLASSIC_PATH)
+
+        # Сравниваем локальные файлы с файлами на Drive
+        for file_path, drive_info in drive_files.items():
+            local_md5 = local_files.get(file_path)
+            drive_md5 = drive_info.get('md5')
+            # Если файл отсутствует локально или MD5 не совпадает (и Drive предоставил MD5)
+            if not local_md5 or (drive_md5 and local_md5 != drive_md5):
+                missing_files.append((drive_info['id'], file_path, drive_info['name']))
+                logging.info(f"Файл {file_path} отсутствует или устарел")
+
+        logging.info(f"Найдено {len(missing_files)} файлов для загрузки")
+        return missing_files
+
+    def show_download_dialog(self, new_files):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Новые курсоры доступны")
+        dialog.setFixedSize(500, 250)
+        dialog.setStyleSheet("background-color: #1a1b1e; border-radius: 10px;")
+        
+        layout = QVBoxLayout(dialog)
+        label = QLabel(f"Обнаружено {len(new_files)} отсутствующих или устаревших курсоров.\nСкачать обновления?")
+        label.setStyleSheet("""
+            color: #aaccff;
+            font-size: 18px;
+            font-family: 'Segoe UI';
+        """)
+        label.setWordWrap(True)
+        label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label)
+
+        btn_box = QHBoxLayout()
+        download_btn = QPushButton("Скачать")
+        download_btn.setStyleSheet(self.button_style())
+        cancel_btn = QPushButton("Отмена")
+        cancel_btn.setStyleSheet(self.button_style())
+        
+        download_btn.clicked.connect(lambda: self.start_download(dialog, new_files))
+        cancel_btn.clicked.connect(dialog.reject)
+        
+        btn_box.addWidget(download_btn)
+        btn_box.addWidget(cancel_btn)
+        layout.addLayout(btn_box)
+
+        dialog.exec()
+
+    def start_download(self, dialog, new_files):
+        dialog.accept()
+        self.stacked.setCurrentWidget(self.loader)
+        self.loader.title_label.setText("Загрузка новых курсоров...")
+        self.loader.file_label.setText("Подготовка...")
+        self.loader.progress.setValue(0)
+
+        self.download_thread = QThread()
+        self.download_worker = DownloadWorker(new_files)
+        self.download_worker.moveToThread(self.download_thread)
+        
+        self.download_worker.progress.connect(self.update_progress)
+        self.download_worker.finished.connect(self.on_download_finished)
+        self.download_worker.error.connect(self.handle_download_error)
+        
+        self.download_thread.started.connect(self.download_worker.run)
+        self.download_thread.start()
+
+    def update_progress(self, progress, file_name, speed):
+        self.loader.file_label.setText(f"Файл: {file_name}")
+        self.loader.progress.setValue(progress)
+        self.loader.info_label.setText(f"Скорость: {speed:.2f} МБ/с")
+
+    def on_download_finished(self):
+        self.loader.title_label.setText("Загрузка завершена!")
+        self.loader.file_label.setText("Обновление завершено")
+        self.loader.progress.setValue(100)
+        self.loader.info_label.setText("")
+        QTimer.singleShot(1000, lambda: (
+            self.stacked.setCurrentWidget(self.browser),
+            self.load_data(),
+            self.update_display()
+        ))
+
+    def handle_download_error(self, error):
+        logging.error(f"Ошибка загрузки: {error}")
+        self.loader.title_label.setText("Ошибка загрузки")
+        self.loader.file_label.setText(f"Ошибка: {error}")
+        self.loader.progress.setValue(0)
+        self.loader.info_label.setText("")
+        QMessageBox.critical(self, "Ошибка", f"Ошибка загрузки: {error}")
+        QTimer.singleShot(2000, self.show_main_menu)
 
     def load_data(self):
         if os.path.exists(RECENT_FILE):
@@ -312,7 +520,7 @@ class MainApp(QWidget):
         if os.path.exists(FAV_FILE):
             with open(FAV_FILE, "r") as f:
                 data = json.load(f)
-                if data and isinstance(data[0], str):  # Миграция старых данных
+                if data and isinstance(data[0], str):
                     self.favorites = [{"name": name, "category": "anime"} for name in data]
                 else:
                     self.favorites = data
@@ -349,6 +557,7 @@ class MainApp(QWidget):
             color: #aaccff;
             font-weight: bold;
             background-color: transparent;
+            font-family: 'Segoe UI';
         """)
         title.setAlignment(Qt.AlignCenter)
         bg_layout.addWidget(title)
@@ -373,6 +582,7 @@ class MainApp(QWidget):
                     border-radius: 8px;
                     font-size: 24px;
                     padding: 15px;
+                    font-family: 'Segoe UI';
                 }
                 QPushButton:hover {
                     background-color: rgba(50,50,100,0.9);
@@ -397,6 +607,7 @@ class MainApp(QWidget):
             color: #aaccff;
             font-weight: bold;
             background-color: transparent;
+            font-family: 'Segoe UI';
         """)
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
@@ -409,38 +620,12 @@ class MainApp(QWidget):
         for text, category in categories:
             btn = QPushButton(text)
             btn.setFixedSize(300, 80)
-            btn.setStyleSheet("""
-                QPushButton {
-                    background-color: rgba(30,30,60,0.8);
-                    color: #aaccff;
-                    border: 2px solid #4466ff;
-                    border-radius: 6px;
-                    padding: 8px;
-                    font-size: 24px;
-                }
-                QPushButton:hover {
-                    background-color: rgba(50,50,100,0.9);
-                    border-color: #88aaff;
-                }
-            """)
+            btn.setStyleSheet(self.button_style())
             btn.clicked.connect(lambda _, c=category: self.start_loading(c))
             layout.addWidget(btn, alignment=Qt.AlignCenter)
 
         back_btn = QPushButton("🔙 Назад")
-        back_btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(30,30,60,0.8);
-                color: #aaccff;
-                border: 2px solid #4466ff;
-                border-radius: 6px;
-                padding: 8px;
-                font-size: 16px;
-            }
-            QPushButton:hover {
-                background-color: rgba(50,50,100,0.9);
-                border-color: #88aaff;
-            }
-        """)
+        back_btn.setStyleSheet(self.button_style())
         back_btn.clicked.connect(self.show_main_menu)
         layout.addWidget(back_btn, alignment=Qt.AlignCenter)
 
@@ -495,7 +680,7 @@ class MainApp(QWidget):
 
         pagination = QHBoxLayout()
         self.page_label = QLabel()
-        self.page_label.setStyleSheet("color: white;")
+        self.page_label.setStyleSheet("color: white; font-family: 'Segoe UI';")
         pagination.addWidget(self.page_label)
 
         self.prev_btn = QPushButton("◀ Назад")
@@ -523,6 +708,7 @@ class MainApp(QWidget):
             color: #aaccff;
             font-weight: bold;
             background-color: transparent;
+            font-family: 'Segoe UI';
         """)
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
@@ -530,6 +716,7 @@ class MainApp(QWidget):
         buttons = [
             ("❤ Поддержать", self.show_support),
             ("Обнова?", self.check_for_update),
+            ("Обновить курсоры", self.update_cursors),
             ("🔙 Назад", self.show_main_menu)
         ]
 
@@ -548,6 +735,7 @@ class MainApp(QWidget):
                     border-radius: 8px;
                     font-size: 24px;
                     padding: 15px;
+                    font-family: 'Segoe UI';
                 }
                 QPushButton:hover {
                     background-color: rgba(50,50,100,0.9);
@@ -568,6 +756,7 @@ class MainApp(QWidget):
                 border-radius: 6px;
                 padding: 8px;
                 font-size: 16px;
+                font-family: 'Segoe UI';
             }
             QPushButton:hover {
                 background-color: rgba(50,50,100,0.9);
@@ -578,6 +767,9 @@ class MainApp(QWidget):
     def start_loading(self, category):
         self.current_category = category
         self.stacked.setCurrentWidget(self.loader)
+        self.loader.title_label.setText("Загрузка курсоров...")
+        self.loader.file_label.setText("Инициализация...")
+        self.loader.progress.setValue(0)
 
         self.thread = QThread()
         self.worker = Worker(category)
@@ -596,6 +788,11 @@ class MainApp(QWidget):
         self.stacked.setCurrentWidget(self.browser)
 
     def handle_error(self, message):
+        logging.error(f"Ошибка загрузки курсоров: {message}")
+        self.loader.title_label.setText("Ошибка")
+        self.loader.file_label.setText(f"Ошибка: {message}")
+        self.loader.progress.setValue(0)
+        self.loader.info_label.setText("")
         QMessageBox.critical(self, "Ошибка", f"Ошибка загрузки курсоров:\n{message}")
         self.show_category_menu()
 
@@ -660,7 +857,7 @@ class MainApp(QWidget):
 
         preview_path = self.find_preview(name, category)
         gif_widget = None
-        if (preview_path):
+        if preview_path:
             gif_widget = AnimatedGIF(preview_path)
             layout.addWidget(gif_widget, alignment=Qt.AlignCenter)
 
@@ -678,7 +875,7 @@ class MainApp(QWidget):
         card.leaveEvent = leave_event
 
         title = QLabel(name)
-        title.setStyleSheet("color: white; font-size: 18px; font-weight: bold;")
+        title.setStyleSheet("color: white; font-size: 18px; font-weight: bold; font-family: 'Segoe UI';")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
 
@@ -721,6 +918,7 @@ class MainApp(QWidget):
             self.update_recent(name)
             self.show_notification(f"Курсор '{name}' установлен!")
         except Exception as e:
+            logging.error(f"Ошибка применения курсора {name}: {str(e)}")
             self.show_notification(f"Ошибка: {str(e)}")
 
     def update_recent(self, name):
@@ -761,6 +959,7 @@ class MainApp(QWidget):
         self.update_display()
 
     def show_notification(self, message):
+        logging.info(f"Уведомление: {message}")
         Notification(message).show()
 
     def show_main_menu(self):
@@ -821,7 +1020,6 @@ class MainApp(QWidget):
         dialog.exec()
 
     def load_cursor_files(self, folder_path):
-        """Загружает файлы курсоров из указанной папки"""
         cursor_files = {}
         if os.path.exists(folder_path):
             for name in os.listdir(folder_path):
@@ -836,13 +1034,12 @@ class MainApp(QWidget):
             reg_path = r"Control Panel\Cursors"
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_SET_VALUE) as key:
                 for key_name, reg_name in CURSOR_KEYS.items():
-                    # Reset each cursor setting to its default value (this depends on the system's default)
                     winreg.SetValueEx(key, reg_name, 0, winreg.REG_SZ, "")
-
             ctypes.windll.user32.SystemParametersInfoW(0x0057, 0, None, 3)
             self.show_notification("Восстановлен стандартный курсор Windows!")
         except Exception as e:
-            self.show_notification(f"Ошибка: {str(e)}") 
+            logging.error(f"Ошибка сброса курсора: {str(e)}")
+            self.show_notification(f"Ошибка: {str(e)}")
 
     def check_for_update(self):
         import requests
@@ -855,7 +1052,6 @@ class MainApp(QWidget):
 
         try:
             self.show_notification("Проверка обновлений...")
-
             response = requests.get(repo_api, timeout=10)
             response.raise_for_status()
             data = response.json()
@@ -863,7 +1059,7 @@ class MainApp(QWidget):
             latest_version = data["tag_name"]
             zip_url = data["zipball_url"]
 
-            if (latest_version != APP_VERSION):
+            if latest_version != APP_VERSION:
                 reply = QMessageBox.question(
                     self,
                     "Новая версия доступна",
@@ -871,8 +1067,7 @@ class MainApp(QWidget):
                     QMessageBox.Yes | QMessageBox.No
                 )
 
-                if (reply == QMessageBox.Yes):
-                    # Скачиваем и распаковываем
+                if reply == QMessageBox.Yes:
                     zip_data = requests.get(zip_url)
                     with zipfile.ZipFile(io.BytesIO(zip_data.content)) as z:
                         temp_dir = "update_temp"
@@ -880,7 +1075,6 @@ class MainApp(QWidget):
                             shutil.rmtree(temp_dir)
                         z.extractall(temp_dir)
 
-                    # Копируем файлы поверх текущих
                     extracted_folders = os.listdir(temp_dir)
                     if extracted_folders:
                         extracted_path = os.path.join(temp_dir, extracted_folders[0])
@@ -897,17 +1091,97 @@ class MainApp(QWidget):
                         shutil.rmtree(temp_dir)
                         self.show_notification("Обновление завершено!")
                         
-                        # Перезапуск
                         QMessageBox.information(self, "Перезапуск", "Программа будет перезапущена.")
                         self.restart_app()
             else:
                 QMessageBox.information(self, "Обновлений нет", "Вы используете последнюю версию.")
         except Exception as e:
+            logging.error(f"Ошибка проверки обновления: {str(e)}")
             QMessageBox.warning(self, "Ошибка", f"Не удалось проверить обновление:\n{str(e)}")
 
     def restart_app(self):
         python = sys.executable
         os.execl(python, python, *sys.argv)
+
+    def update_cursors(self):
+        self.check_for_new_cursors()
+
+class DownloadWorker(QObject):  
+    progress = Signal(int, str, float)
+    finished = Signal()
+    error = Signal(str)
+
+    def __init__(self, files_to_download):
+        super().__init__()
+        self.files_to_download = files_to_download
+        self.drive_service = authenticate_google_drive()
+
+    def run(self):
+        try:
+            total_files = len(self.files_to_download)
+            if total_files == 0:
+                logging.info("Нет файлов для загрузки")
+                self.finished.emit()
+                return
+
+            logging.info(f"Начинается загрузка {total_files} файлов")
+            for idx, (file_id, file_path, file_name) in enumerate(self.files_to_download):
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                self.download_file(file_id, file_path, file_name)
+                overall_progress = int(((idx + 1) / total_files) * 100)
+                self.progress.emit(overall_progress, file_name, 0.0)
+            logging.info("Загрузка завершена")
+            self.finished.emit()
+        except Exception as e:
+            logging.error(f"Ошибка в процессе загрузки: {str(e)}")
+            self.error.emit(str(e))
+
+    def download_file(self, file_id, file_path, file_name):
+        try:
+            logging.info(f"Загрузка файла {file_name} (ID: {file_id})")
+            request = self.drive_service.files().get_media(fileId=file_id)
+            with open(file_path, 'wb') as f:
+                downloader = MediaIoBaseDownload(f, request)
+                done = False
+                start_time = time.time()
+                downloaded_bytes = 0
+                while not done:
+                    status, done = downloader.next_chunk()
+                    if status:
+                        progress = int(status.progress() * 100)
+                        elapsed_time = time.time() - start_time
+                        downloaded_bytes = status.resumable_progress
+                        speed = (downloaded_bytes / 1024 / 1024) / elapsed_time if elapsed_time > 0 else 0
+                        self.progress.emit(progress, file_name, speed)
+        except Exception as e:
+            logging.error(f"Ошибка загрузки {file_name}: {str(e)}")
+            self.error.emit(f"Ошибка загрузки {file_name}: {str(e)}")
+            raise
+
+def authenticate_google_drive():
+    creds = None
+    try:
+        if os.path.exists(TOKEN_FILE):
+            creds = Credentials.from_authorized_user_file(TOKEN_FILE, ['https://www.googleapis.com/auth/drive.readonly'])
+        
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                if not os.path.exists(CLIENT_SECRET_FILE):
+                    raise FileNotFoundError(f"Файл {CLIENT_SECRET_FILE} не найден")
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    CLIENT_SECRET_FILE, ['https://www.googleapis.com/auth/drive.readonly']
+                )
+                creds = flow.run_local_server(port=0)
+
+            with open(TOKEN_FILE, 'w') as token:
+                token.write(creds.to_json())
+
+        return build('drive', 'v3', credentials=creds)
+    except Exception as e:
+        logging.error(f"Ошибка авторизации Google Drive: {str(e)}")
+        raise
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
