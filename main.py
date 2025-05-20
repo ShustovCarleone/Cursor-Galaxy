@@ -5,6 +5,11 @@ import ctypes
 import webbrowser
 import random
 import hashlib
+import requests
+import zipfile
+import io
+import shutil
+import subprocess
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QStackedWidget, QProgressBar, QFrame, QScrollArea, QGridLayout, 
@@ -18,30 +23,18 @@ from PySide6.QtGui import (
     QMovie, QPixmap, QIcon, QPainter, QPen, QConicalGradient, 
     QColor, QBrush, QLinearGradient, QRadialGradient, QFont
 )
-
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-import ssl
 import time
 import logging
 
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-
-APP_VERSION = "v1.2.0"
+APP_VERSION = "v1.3.0"
 RECENT_FILE = "recent_cursors.json"
 FAV_FILE = "favorites.json"
 CURSOR_LIB_PATH = "CursorsLib"
-ANIME_PATH = os.path.join(CURSOR_LIB_PATH, "Anime")
-CLASSIC_PATH = os.path.join(CURSOR_LIB_PATH, "Classic")
-CLIENT_SECRET_FILE = 'client_secret_487085146579-e82n54kie2or045ssev7r4qmue844db8.apps.googleusercontent.com.json'
-TOKEN_FILE = 'token.json'
-ANIME_FOLDER_ID = '1mz8c78Sd8-Obb4RAc12pBe1khlBd7ZmF'
-CLASSIC_FOLDER_ID = '1CRhP3Hvld-d_0LpRjruUEk24KNhJ8FsC'
+ANIME_PATH = os.path.join(CURSOR_LIB_PATH, "CursorsLib", "Anime")
+CLASSIC_PATH = os.path.join(CURSOR_LIB_PATH, "CursorsLib", "Classic")
+GITHUB_CURSORS_URL = "https://github.com/ShustovCarleone/Cursor-Galaxy/releases/download/v1.2.0/CursorsLib.zip"
 
 CURSOR_KEYS = {
     "pointer": "Arrow",
@@ -193,12 +186,13 @@ class Worker(QObject):
             self.error.emit(str(e))
 
     def load_cursors(self):
-        path = ANIME_PATH if self.category == "anime" else CLASSIC_PATH
+        # Теперь ищем курсоры в CursorLib/CursorsLib/Anime и CursorLib/CursorsLib/Classic
+        base_path = os.path.join(CURSOR_LIB_PATH, "CursorsLib")
+        path = os.path.join(base_path, "Anime") if self.category == "anime" else os.path.join(base_path, "Classic")
         cursors = {}
-        
+        # Не создаём папки, если их нет
         if not os.path.exists(path):
-            os.makedirs(path, exist_ok=True)
-
+            return cursors
         for folder in os.listdir(path):
             full_path = os.path.join(path, folder)
             if os.path.isdir(full_path):
@@ -286,7 +280,7 @@ class Loader(QWidget):
         self.setStyleSheet("background-color: #1a1b1e; border-radius: 10px;")
         layout = QVBoxLayout(self)
 
-        self.title_label = QLabel("Загрузка курсоров...")
+        self.title_label = QLabel("Проверка новых курсоров...")
         self.title_label.setStyleSheet("""
             color: #aaccff;
             font-size: 42px;
@@ -296,7 +290,7 @@ class Loader(QWidget):
         self.title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.title_label)
 
-        self.file_label = QLabel("Ожидание...")
+        self.file_label = QLabel("Инициализация...")
         self.file_label.setStyleSheet("""
             color: #88aaff;
             font-size: 16px;
@@ -333,6 +327,129 @@ class Loader(QWidget):
         self.info_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.info_label)
 
+class GitHubCheckWorker(QObject):
+    progress = Signal(int, str)
+    finished = Signal(bool)
+    error = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+
+    def run(self):
+        try:
+            logging.info("Начало проверки новых курсоров с GitHub...")
+            needs_update = self.verify_files()
+            self.finished.emit(needs_update)
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def verify_files(self):
+        logging.info("Проверка локальных файлов...")
+        local_files = {}
+
+        # Собираем локальные файлы и их MD5-хеши
+        for path in [ANIME_PATH, CLASSIC_PATH]:
+            if not os.path.exists(path):
+                os.makedirs(path, exist_ok=True)
+            for root, _, files in os.walk(path):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    try:
+                        with open(file_path, 'rb') as f:
+                            local_files[file_path] = hashlib.md5(f.read()).hexdigest()
+                    except Exception as e:
+                        logging.warning(f"Не удалось вычислить MD5 для {file_path}: {str(e)}")
+
+        # Скачиваем архив с GitHub и проверяем содержимое
+        response = requests.get(GITHUB_CURSORS_URL, stream=True)
+        response.raise_for_status()
+
+        zip_data = io.BytesIO()
+        total_size = int(response.headers.get('content-length', 0))
+        downloaded_size = 0
+        start_time = time.time()
+
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                zip_data.write(chunk)
+                downloaded_size += len(chunk)
+                if total_size > 0:
+                    progress = int((downloaded_size / total_size) * 100)
+                    elapsed_time = time.time() - start_time
+                    speed = (downloaded_size / 1024 / 1024) / elapsed_time if elapsed_time > 0 else 0
+                    self.progress.emit(progress, f"Скачивание архива... Скорость: {speed:.2f} МБ/с")
+
+        zip_data.seek(0)
+        github_files = {}
+        with zipfile.ZipFile(zip_data, 'r') as zip_ref:
+            file_list = zip_ref.namelist()
+            total_files = len(file_list)
+            for idx, file_name in enumerate(file_list):
+                if file_name.endswith(('.cur', '.ani')):
+                    relative_path = file_name.replace("CursorsLib/", "", 1)
+                    with zip_ref.open(file_name) as f:
+                        github_files[relative_path] = hashlib.md5(f.read()).hexdigest()
+                progress = int(((idx + 1) / total_files) * 100)
+                self.progress.emit(progress, f"Проверка файла: {file_name}")
+
+        # Сравниваем локальные файлы с файлами в архиве
+        needs_update = False
+        for file_path, github_md5 in github_files.items():
+            local_md5 = local_files.get(file_path)
+            if not local_md5 or local_md5 != github_md5:
+                needs_update = True
+                break
+
+        return needs_update
+
+class GitHubDownloadWorker(QObject):
+    progress = Signal(int, str, float)
+    finished = Signal()
+    error = Signal(str)
+
+    def __init__(self, url, install_dir):
+        super().__init__()
+        self.url = url
+        self.install_dir = install_dir
+
+    def run(self):
+        try:
+            logging.info(f"Начинается загрузка архива с {self.url}")
+            response = requests.get(self.url, stream=True)
+            response.raise_for_status()
+
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded_size = 0
+            zip_path = "temp_cursors.zip"
+
+            with open(zip_path, 'wb') as f:
+                start_time = time.time()
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded_size += len(chunk)
+                        if total_size > 0:
+                            progress = int((downloaded_size / total_size) * 100)
+                            elapsed_time = time.time() - start_time
+                            speed = (downloaded_size / 1024 / 1024) / elapsed_time if elapsed_time > 0 else 0
+                            self.progress.emit(progress, "CursorsLib.zip", speed)
+
+            logging.info("Загрузка завершена, начинаем распаковку")
+            self.extract_zip(zip_path, self.install_dir)
+            os.remove(zip_path)
+            logging.info("Распаковка завершена")
+            self.finished.emit()
+        except Exception as e:
+            logging.error(f"Ошибка в процессе загрузки: {str(e)}")
+            self.error.emit(str(e))
+
+    def extract_zip(self, zip_path, extract_to):
+        if os.path.exists(extract_to):
+            shutil.rmtree(extract_to)
+        os.makedirs(extract_to, exist_ok=True)
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_to)
+
 class MainApp(QWidget):
     def __init__(self):
         super().__init__()
@@ -351,10 +468,9 @@ class MainApp(QWidget):
         self.current_category = "anime"
         self.is_fav_mode = False
 
-        self.last_drive_check = None
         self.init_ui()
         self.load_data()
-        self.check_for_new_cursors()
+        self.start_check_process()
 
     def check_cursors_exist(self):
         def has_files(path):
@@ -365,87 +481,49 @@ class MainApp(QWidget):
             has_files(CLASSIC_PATH)
         ])
 
-    def check_for_new_cursors(self):
-        try:
-            logging.info("Проверка новых курсоров...")
-            drive_service = authenticate_google_drive()
-            missing_files = self.verify_installed_files(drive_service)
-            
-            if not missing_files:
-                logging.info("Все курсоры уже установлены")
-                self.show_notification("Все курсоры уже установлены!")
-                return
-            
-            logging.info(f"Найдено {len(missing_files)} отсутствующих/устаревших файлов")
-            self.show_download_dialog(missing_files)
-        except Exception as e:
-            logging.error(f"Ошибка проверки новых курсоров: {str(e)}")
-            self.show_notification(f"Ошибка проверки курсоров: {str(e)}")
+    def start_check_process(self):
+        self.stacked.setCurrentWidget(self.loader)
+        self.check_thread = QThread()
+        self.check_worker = GitHubCheckWorker()
+        self.check_worker.moveToThread(self.check_thread)
+        self.check_thread.started.connect(self.check_worker.run)
+        self.check_worker.progress.connect(self.update_check_progress)
+        self.check_worker.finished.connect(self.handle_check_finished)
+        self.check_worker.error.connect(self.handle_check_error)
+        self.check_worker.finished.connect(self.check_thread.quit)
+        self.check_thread.start()
 
-    def verify_installed_files(self, drive_service):
-        """Проверяет, все ли файлы с Google Drive присутствуют локально"""
-        logging.info("Проверка локальных файлов...")
-        local_files = {}
-        missing_files = []
+    def update_check_progress(self, progress, message):
+        self.loader.progress.setValue(progress)
+        self.loader.file_label.setText(message)
 
-        # Собираем локальные файлы и их MD5-хеши
-        for path in [ANIME_PATH, CLASSIC_PATH]:
-            if not os.path.exists(path):
-                os.makedirs(path, exist_ok=True)
-            for root, _, files in os.walk(path):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    try:
-                        with open(file_path, 'rb') as f:
-                            local_files[file_path] = hashlib.md5(f.read()).hexdigest()
-                    except Exception as e:
-                        logging.warning(f"Не удалось вычислить MD5 для {file_path}: {str(e)}")
+    def handle_check_finished(self, needs_update):
+        self.loader.title_label.setText("Проверка завершена!")
+        self.loader.file_label.setText("Готово")
+        self.loader.progress.setValue(100)
+        self.loader.info_label.setText("")
+        QTimer.singleShot(1000, lambda: (
+            self.stacked.setCurrentWidget(self.browser),
+            self.show_download_dialog() if needs_update else self.show_notification("Все курсоры актуальны!")
+        ))
 
-        # Собираем файлы с Google Drive рекурсивно
-        drive_files = {}
-        def collect_drive_files(folder_id, base_path):
-            try:
-                results = drive_service.files().list(
-                    q=f"'{folder_id}' in parents",
-                    fields="files(id, name, mimeType, md5Checksum)"
-                ).execute()
-                for item in results.get('files', []):
-                    file_path = os.path.join(base_path, item['name'])
-                    if item.get('mimeType') == 'application/vnd.google-apps.folder':
-                        collect_drive_files(item['id'], file_path)
-                    else:
-                        drive_files[file_path] = {
-                            'id': item['id'],
-                            'name': item['name'],
-                            'md5': item.get('md5Checksum')
-                        }
-            except Exception as e:
-                logging.error(f"Ошибка при получении файлов с Drive (folder_id: {folder_id}): {str(e)}")
+    def handle_check_error(self, error):
+        logging.error(f"Ошибка проверки курсоров: {error}")
+        self.loader.title_label.setText("Ошибка проверки")
+        self.loader.file_label.setText(f"Ошибка: {error}")
+        self.loader.progress.setValue(0)
+        self.loader.info_label.setText("")
+        QMessageBox.critical(self, "Ошибка", f"Ошибка проверки курсоров:\n{error}")
+        QTimer.singleShot(2000, lambda: self.stacked.setCurrentWidget(self.browser))
 
-        logging.info("Получение файлов с Google Drive...")
-        collect_drive_files(ANIME_FOLDER_ID, ANIME_PATH)
-        collect_drive_files(CLASSIC_FOLDER_ID, CLASSIC_PATH)
-
-        # Сравниваем локальные файлы с файлами на Drive
-        for file_path, drive_info in drive_files.items():
-            local_md5 = local_files.get(file_path)
-            drive_md5 = drive_info.get('md5')
-            # Если файл отсутствует локально или MD5 не совпадает (и Drive предоставил MD5)
-            if not local_md5 or (drive_md5 and local_md5 != drive_md5):
-                missing_files.append((drive_info['id'], file_path, drive_info['name']))
-                logging.info(f"Файл {file_path} отсутствует или устарел")
-
-        logging.info(f"Найдено {len(missing_files)} файлов для загрузки")
-        return missing_files
-
-    def show_download_dialog(self, new_files):
+    def show_download_dialog(self):
         dialog = QDialog(self)
-        dialog.setWindowTitle("Новые курсоры доступны")
+        dialog.setWindowTitle("Обновление курсоров")
         dialog.setFixedSize(500, 250)
         dialog.setStyleSheet("background-color: #1a1b1e; border-radius: 10px;")
         
         layout = QVBoxLayout(dialog)
-        label = QLabel(f"Обнаружено {len(new_files)} отсутствующих или устаревших курсоров.\nСкачать обновления?")
+        label = QLabel("Обнаружены новые или отсутствующие курсоры.\nСкачать обновления с GitHub?")
         label.setStyleSheet("""
             color: #aaccff;
             font-size: 18px;
@@ -461,7 +539,7 @@ class MainApp(QWidget):
         cancel_btn = QPushButton("Отмена")
         cancel_btn.setStyleSheet(self.button_style())
         
-        download_btn.clicked.connect(lambda: self.start_download(dialog, new_files))
+        download_btn.clicked.connect(lambda: self.start_download(dialog))
         cancel_btn.clicked.connect(dialog.reject)
         
         btn_box.addWidget(download_btn)
@@ -470,7 +548,7 @@ class MainApp(QWidget):
 
         dialog.exec()
 
-    def start_download(self, dialog, new_files):
+    def start_download(self, dialog):
         dialog.accept()
         self.stacked.setCurrentWidget(self.loader)
         self.loader.title_label.setText("Загрузка новых курсоров...")
@@ -478,7 +556,7 @@ class MainApp(QWidget):
         self.loader.progress.setValue(0)
 
         self.download_thread = QThread()
-        self.download_worker = DownloadWorker(new_files)
+        self.download_worker = GitHubDownloadWorker(GITHUB_CURSORS_URL, CURSOR_LIB_PATH)
         self.download_worker.moveToThread(self.download_thread)
         
         self.download_worker.progress.connect(self.update_progress)
@@ -543,6 +621,8 @@ class MainApp(QWidget):
         self.create_loader()
         self.create_browser()
         self.create_functions_menu()
+        # Устанавливаем главное меню как стартовую вкладку
+        self.stacked.setCurrentIndex(0)
 
     def create_main_menu(self):
         container = QWidget()
@@ -716,7 +796,6 @@ class MainApp(QWidget):
         buttons = [
             ("❤ Поддержать", self.show_support),
             ("Обнова?", self.check_for_update),
-            ("Обновить курсоры", self.update_cursors),
             ("🔙 Назад", self.show_main_menu)
         ]
 
@@ -818,12 +897,9 @@ class MainApp(QWidget):
                 path = ANIME_PATH if item["category"] == "anime" else CLASSIC_PATH
                 full_path = os.path.join(path, item["name"])
                 if os.path.isdir(full_path):
-                    files = os.listdir(full_path)
-                    cursor_files = {
-                        k: os.path.abspath(os.path.join(full_path, v))
-                        for k, v in self.load_cursor_files(full_path).items()
-                    }
-                    self.current_cursors[item["name"]] = cursor_files
+                    cursor_files = self.load_cursor_files(full_path)
+                    if cursor_files:  # Только если есть файлы курсоров
+                        self.current_cursors[item["name"]] = cursor_files
 
         total_pages = (len(filtered) - 1) // self.items_per_page + 1
         start = self.current_page * self.items_per_page
@@ -892,7 +968,9 @@ class MainApp(QWidget):
         return card
 
     def find_preview(self, name, category):
-        path = ANIME_PATH if category == "anime" else CLASSIC_PATH
+        # Теперь ищем превью в CursorLib/CursorsLib/Anime/<name>/preview.gif или CursorLib/CursorsLib/Classic/<name>/preview.gif
+        base_path = os.path.join(CURSOR_LIB_PATH, "CursorsLib")
+        path = os.path.join(base_path, "Anime") if category == "anime" else os.path.join(base_path, "Classic")
         preview = os.path.join(path, name, "preview.gif")
         return preview if os.path.exists(preview) else None
 
@@ -941,7 +1019,7 @@ class MainApp(QWidget):
 
     def toggle_fav_mode(self):
         self.is_fav_mode = not self.is_fav_mode
-        self.fav_btn.setText("⭐ Избранное" if not self.is_fav_mode else "📁 Все")
+        self.fav_btn.setText("⭐ Избранное" if not self.is_fav_mode else "⭐ Избранное")
         self.update_display()
 
     def switch_category(self, category):
@@ -1104,84 +1182,7 @@ class MainApp(QWidget):
         os.execl(python, python, *sys.argv)
 
     def update_cursors(self):
-        self.check_for_new_cursors()
-
-class DownloadWorker(QObject):  
-    progress = Signal(int, str, float)
-    finished = Signal()
-    error = Signal(str)
-
-    def __init__(self, files_to_download):
-        super().__init__()
-        self.files_to_download = files_to_download
-        self.drive_service = authenticate_google_drive()
-
-    def run(self):
-        try:
-            total_files = len(self.files_to_download)
-            if total_files == 0:
-                logging.info("Нет файлов для загрузки")
-                self.finished.emit()
-                return
-
-            logging.info(f"Начинается загрузка {total_files} файлов")
-            for idx, (file_id, file_path, file_name) in enumerate(self.files_to_download):
-                os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                self.download_file(file_id, file_path, file_name)
-                overall_progress = int(((idx + 1) / total_files) * 100)
-                self.progress.emit(overall_progress, file_name, 0.0)
-            logging.info("Загрузка завершена")
-            self.finished.emit()
-        except Exception as e:
-            logging.error(f"Ошибка в процессе загрузки: {str(e)}")
-            self.error.emit(str(e))
-
-    def download_file(self, file_id, file_path, file_name):
-        try:
-            logging.info(f"Загрузка файла {file_name} (ID: {file_id})")
-            request = self.drive_service.files().get_media(fileId=file_id)
-            with open(file_path, 'wb') as f:
-                downloader = MediaIoBaseDownload(f, request)
-                done = False
-                start_time = time.time()
-                downloaded_bytes = 0
-                while not done:
-                    status, done = downloader.next_chunk()
-                    if status:
-                        progress = int(status.progress() * 100)
-                        elapsed_time = time.time() - start_time
-                        downloaded_bytes = status.resumable_progress
-                        speed = (downloaded_bytes / 1024 / 1024) / elapsed_time if elapsed_time > 0 else 0
-                        self.progress.emit(progress, file_name, speed)
-        except Exception as e:
-            logging.error(f"Ошибка загрузки {file_name}: {str(e)}")
-            self.error.emit(f"Ошибка загрузки {file_name}: {str(e)}")
-            raise
-
-def authenticate_google_drive():
-    creds = None
-    try:
-        if os.path.exists(TOKEN_FILE):
-            creds = Credentials.from_authorized_user_file(TOKEN_FILE, ['https://www.googleapis.com/auth/drive.readonly'])
-        
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                if not os.path.exists(CLIENT_SECRET_FILE):
-                    raise FileNotFoundError(f"Файл {CLIENT_SECRET_FILE} не найден")
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    CLIENT_SECRET_FILE, ['https://www.googleapis.com/auth/drive.readonly']
-                )
-                creds = flow.run_local_server(port=0)
-
-            with open(TOKEN_FILE, 'w') as token:
-                token.write(creds.to_json())
-
-        return build('drive', 'v3', credentials=creds)
-    except Exception as e:
-        logging.error(f"Ошибка авторизации Google Drive: {str(e)}")
-        raise
+        self.start_check_process()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
